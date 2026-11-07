@@ -62,7 +62,7 @@ jobs:
           grep -qF "$RELAY" _site/config.js
           # Public, non-secret receipt of what this site is.
           pubsha=""
-          if [ -n "$FEEDBACK_PUBLIC_KEY" ]; then pubsha=$(printf '%s' "$FEEDBACK_PUBLIC_KEY" | sha256sum | cut -d' ' -f1); fi
+          if [ -n "$FEEDBACK_PUBLIC_KEY" ]; then pubsha=$(node -e "process.stdout.write(require('crypto').createHash('sha256').update(Buffer.from(process.env.FEEDBACK_PUBLIC_KEY,'base64url')).digest('hex'))"); fi
           cat > _site/provenance.json <<EOF
           {"previewRepo":"${GITHUB_REPOSITORY}","sourceRepo":"${SOURCE_REPO}","sourceHead":"${SHA}","APP_VERSION":"${SHA}","buildRunUrl":"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}","relayOrigin":"${RELAY}","blobOrigin":"${BLOB_ORIGIN}","feedbackKeyId":"${FEEDBACK_KEY_ID}","feedbackPublicKeySha256":"${pubsha}","feedbackSendEnabled":$([ -n "$FEEDBACK_PUBLIC_KEY" ] && echo true || echo false)}
           EOF
