@@ -1,0 +1,97 @@
+name: Preview
+
+# Throwaway, isolated preview of one exact danswett/agent-bridge commit, for real-device
+# testing against STAGING. It has its own origin (https://preview.slipgates.com), so its
+# service worker, caches and storage are separate from production. It holds no deploy
+# credential for production and the build holds no token. Only the PUBLIC feedback key id
+# and public half are read, from this repository's variables.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character commit SHA of danswett/agent-bridge to build
+        required: true
+        type: string
+
+env:
+  SOURCE_REPO: danswett/agent-bridge
+  RELAY: https://relay-staging.slipgates.com
+  BLOB_ORIGIN: https://abblobstgwus2.blob.core.windows.net
+  FEEDBACK_KEY_ID: ${{ vars.FEEDBACK_KEY_ID }}
+  FEEDBACK_PUBLIC_KEY: ${{ vars.FEEDBACK_PUBLIC_KEY }}
+
+permissions: {}
+
+concurrency:
+  group: preview
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - name: Check the SHA
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then echo "sha must be 40 lowercase hex characters"; exit 1; fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: The PWA's packages
+        run: npm ci --prefix pwa --ignore-scripts --no-audit --no-fund
+      - name: Build the PWA at the site root
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$SHA" ]
+          node pwa/tools/build-site.mjs --out _site --relay "$RELAY" --blob-origin "$BLOB_ORIGIN" --version "$SHA" --feedback-key-id "$FEEDBACK_KEY_ID" --feedback-public-key "$FEEDBACK_PUBLIC_KEY"
+          grep -q 'Content-Security-Policy' _site/index.html
+          grep -qF "$BLOB_ORIGIN" _site/index.html
+          grep -qF "$RELAY" _site/index.html
+          grep -qF "wss://${RELAY#https://}" _site/index.html
+          grep -qF "$RELAY" _site/config.js
+          # Public, non-secret receipt of what this site is.
+          pubsha=""
+          if [ -n "$FEEDBACK_PUBLIC_KEY" ]; then pubsha=$(printf '%s' "$FEEDBACK_PUBLIC_KEY" | sha256sum | cut -d' ' -f1); fi
+          cat > _site/provenance.json <<EOF
+          {"previewRepo":"${GITHUB_REPOSITORY}","sourceRepo":"${SOURCE_REPO}","sourceHead":"${SHA}","APP_VERSION":"${SHA}","buildRunUrl":"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}","relayOrigin":"${RELAY}","blobOrigin":"${BLOB_ORIGIN}","feedbackKeyId":"${FEEDBACK_KEY_ID}","feedbackPublicKeySha256":"${pubsha}","feedbackSendEnabled":$([ -n "$FEEDBACK_PUBLIC_KEY" ] && echo true || echo false)}
+          EOF
+          grep -q '"sourceHead"' _site/provenance.json
+      - name: Archive digest
+        id: pack
+        run: |
+          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf site.tar -C _site .
+          echo "sha256=$(sha256sum site.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+      - name: Receipt
+        env:
+          SHA256: ${{ needs.build.outputs.artifact_sha256 }}
+        run: |
+          echo "deploymentRunUrl=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> "$GITHUB_STEP_SUMMARY"
+          echo "artifactSha256(unpacked site tar)=${SHA256}" >> "$GITHUB_STEP_SUMMARY"
